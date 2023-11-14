@@ -36,6 +36,13 @@
       root
     (user-error "No calls for symbol at point")))
 
+(defun eglot-hierarchy--convert-root-item (item method)
+  "Convert the ITEM for use with METHOD."
+  (let* ((field (eglot-hierarchy--method-to-field method))
+         (root-item (or (plist-get item :from) (plist-get item :to)))
+         (root-range (plist-get root-item :selectionRange)))
+    `(,field ,root-item :fromRanges [,root-range])))
+
 (defun eglot-hierarchy--result-jump-range (result method)
   "Get the jump range for RESULT based on the METHOD.
 For incoming calls should jump to :fromRange, but outgoing calls should jump to
@@ -52,14 +59,22 @@ incomingCalls places the item in :from while outgoingCalls places it in :to."
     (:callHierarchy/outgoingCalls :to)
     (_ (error "Invalid call hierarchy method"))))
 
+(defun eglot-hierarchy--labelfn-button (labelfn actionfn)
+  "`hierarchy-labelfn-button' but passes the item to `make-text-button'."
+  (lambda (item indent)
+    (let ((start (point)))
+      (funcall labelfn item indent)
+      (make-text-button start (point)
+                        'button-data item
+                        'action (lambda (data) (funcall actionfn data indent))))))
+
 (defun eglot-hierarchy--make-call-tree (root server method)
   "Make a call tree for ROOT with eglot SERVER using METHOD.
 METHOD should be either :callHierarchy/incomingCalls or
 :callHierarchy/outgoingCalls."
-  (eglot-server-capable-or-lose :callHierarchyProvider)
   (when-let* ((hierarchy (hierarchy-new))
               (location (eglot-hierarchy--method-to-field method))
-              (labelfn (hierarchy-labelfn-button (eglot-hierarchy--labelfn method) (eglot-hierarchy--goto-result method)))
+              (labelfn (eglot-hierarchy--labelfn-button (eglot-hierarchy--labelfn method) (eglot-hierarchy--goto-result method)))
               (childfn (lambda (item)
                          ;; item is HierarchyItem
                          ;; TODO: remove unnecessary let
@@ -88,18 +103,26 @@ METHOD is used to select the right field in the response."
       (find-file-other-window path)
       (goto-char (car (eglot-range-region range))))))
 
-(defun eglot-hierarchy--display-call-tree (method &optional buffer)
+(defun eglot-hierarchy--display-call-tree (method &optional buffer root)
   "Display the call tree in BUFFER for METHOD.
 
 If BUFFER is provided, it will be used instead of creating a new buffer."
+  (eglot-server-capable-or-lose :callHierarchyProvider)
   (let* ((server (eglot--current-server-or-lose))
-         (root (eglot-hierarchy--prepare-root-item server method))
+         (root (if root
+                   root
+                 (eglot-hierarchy--prepare-root-item server method)))
+         (root-item (or (plist-get root :from) (plist-get root :to)))
          (tree-widget (eglot-hierarchy--make-call-tree root server method))
-         (buffer (or buffer (generate-new-buffer (concat "Incoming calls: " (plist-get root :name))))))
+         (buffer-prefix (pcase method
+                          (:callHierarchy/incomingCalls "Incoming calls: ")
+                          (:callHierarchy/outgoingCalls "Outgoing calls: ")))
+         (buffer (or buffer (generate-new-buffer (concat buffer-prefix (plist-get root-item :name))))))
     (with-current-buffer buffer
       (setq-local buffer-read-only t)
       (let ((inhibit-read-only t))
         (eglot-hierarchy-mode)
+        (setq-local eglot--cached-server server)
         (widget-create tree-widget)
         (goto-char (point-min))))
     (select-window (display-buffer buffer '((display-buffer-in-side-window)
@@ -111,14 +134,14 @@ If BUFFER is provided, it will be used instead of creating a new buffer."
 
 If BUFFER is provided, it will be used instead of creating a new buffer."
   (interactive)
-  (eglot-hierarchy--display-call-tree :callHierarchy/incomingCalls buffer))
+  (eglot-hierarchy--display-call-tree :callHierarchy/incomingCalls buffer nil))
 
 (defun eglot-hierarchy-outgoing-calls (&optional buffer)
   "Display the outgoing call tree in BUFFER.
 
 If BUFFER is provided, it will be used instead of creating a new buffer."
   (interactive)
-  (eglot-hierarchy--display-call-tree :callHierarchy/outgoingCalls buffer))
+  (eglot-hierarchy--display-call-tree :callHierarchy/outgoingCalls buffer nil))
 
 ;; inspired/stolen from dape - this seems like something tree-widget should have built in
 (defun eglot-hierarchy--press-widget-at-line (predicate)
@@ -143,9 +166,13 @@ If BUFFER is provided, it will be used instead of creating a new buffer."
 (defun eglot-hierarchy-select-line ()
   "Press the action button on the current line."
   (interactive)
+  (eglot-hierarchy--do-at-nearest-button (lambda () (push-button (point)))))
+
+(defun eglot-hierarchy--do-at-nearest-button (action)
+  "Call ACTION at the nearest button on the same line."
   (save-excursion
     (if (button-at (point))
-        (push-button (point))
+        (funcall action)
       (pcase-let ((`(,start . ,end) (bounds-of-thing-at-point 'line))
                   (found))
         (goto-char start)
@@ -153,10 +180,11 @@ If BUFFER is provided, it will be used instead of creating a new buffer."
                     (< (point) end))
           (cond
            ((button-at (point))
-            (push-button (point))
+            (funcall action)
             (setq found t))
            ((eobp) (setq found t))
-           (t (forward-button 1 t nil t))))))))
+           (t (when (not (forward-button 1 t nil t))
+                (setq found t)))))))))
 
 (defun eglot-hierarchy-tree-dwim ()
   "Toggle tree expansion in *eglot hierarchy* buffer."
@@ -165,10 +193,37 @@ If BUFFER is provided, it will be used instead of creating a new buffer."
                                            (memq (widget-type widget)
                                                  '(tree-widget-open-icon tree-widget-close-icon)))))
 
+(defun eglot-hierarchy-incoming-calls-at-point ()
+  "Display incoming calls for item at point."
+  (interactive)
+  (eglot-hierarchy--do-at-nearest-button
+   (lambda ()
+     (eglot-hierarchy--display-call-tree
+      :callHierarchy/incomingCalls
+      nil
+      (eglot-hierarchy--convert-root-item (button-get (button-at (point)) 'button-data) :callHierarchy/incomingCalls)))))
+
+(defun eglot-hierarchy-outgoing-calls-at-point ()
+  "Display outgoing calls for item at point."
+  (interactive)
+  (eglot-hierarchy--do-at-nearest-button
+   (lambda ()
+     (eglot-hierarchy--display-call-tree
+      :callHierarchy/outgoingCalls
+      nil
+      (eglot-hierarchy--convert-root-item (button-get (button-at (point)) 'button-data) :callHierarchy/outgoingCalls)))))
+
 (defvar eglot-hierarchy-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "<tab>") #'eglot-hierarchy-tree-dwim)
     (define-key map (kbd "<return>") #'eglot-hierarchy-select-line)
+    (define-key map (kbd "i") #'eglot-hierarchy-incoming-calls-at-point)
+    (define-key map (kbd "o") #'eglot-hierarchy-outgoing-calls-at-point)
+
+    ;; evil support
+    (when (fboundp 'evil-define-key)
+      (evil-define-key evil-motion-state-map map (kbd "i") #'eglot-hierarchy-incoming-calls-at-point)
+      (evil-define-key evil-motion-state-map map (kbd "o") #'eglot-hierarchy-outgoing-calls-at-point))
     map)
   "Keymap active in *eglot-hierarchy* buffers.")
 
@@ -181,6 +236,9 @@ If BUFFER is provided, it will be used instead of creating a new buffer."
               truncate-lines t
               indent-tabs-mode nil
               tree-widget-image-enable nil))
+
+(when (fboundp 'evil-set-initial-state)
+  (evil-set-initial-state 'eglot-hierarchy-mode 'motion))
 
 (provide 'eglot-hierarchy)
 ;;; eglot-hierarchy.el ends here
