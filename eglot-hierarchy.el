@@ -25,6 +25,9 @@
 (require 'button)
 (require 'tree-widget)
 
+;; TODO: separate defface for the detail instead of using eglot-inlay-hint
+;; TODO: add defcustom for pretty hierarchy
+
 ;;; Code:
 (defun eglot-hierarchy--prepare-root-item (server method)
   "Prepare root item for METHOD using SERVER."
@@ -77,9 +80,14 @@ METHOD should be either :callHierarchy/incomingCalls or
               (labelfn (eglot-hierarchy--labelfn-button (eglot-hierarchy--labelfn method) (eglot-hierarchy--goto-result method)))
               (childfn (lambda (item)
                          ;; item is HierarchyItem
-                         ;; TODO: remove unnecessary let
-                         (let ((res (eglot--request server method `(:item ,(plist-get item location)))))
-                           res))))
+                         (let* ((res (eglot--request server method `(:item ,(plist-get item location))))
+                                (field (eglot-hierarchy--method-to-field method))
+                                (items (apply 'append (mapcar (lambda (item)
+                                                                (mapcar (lambda (from-range)
+                                                                          `(,field ,(plist-get item field) :fromRanges [,from-range]))
+                                                                        (plist-get item :fromRanges)))
+                                                              res))))
+                           items))))
     (hierarchy-add-tree hierarchy root nil childfn nil t)
     (hierarchy-convert-to-tree-widget hierarchy labelfn)))
 
