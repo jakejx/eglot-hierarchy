@@ -227,11 +227,6 @@ If BUFFER is provided, it will be used instead of creating a new buffer."
     (define-key map (kbd "<return>") #'eglot-hierarchy-select-line)
     (define-key map (kbd "i") #'eglot-hierarchy-incoming-calls-at-point)
     (define-key map (kbd "o") #'eglot-hierarchy-outgoing-calls-at-point)
-
-    ;; evil support
-    (when (fboundp 'evil-define-key)
-      (evil-define-key evil-motion-state-map map (kbd "i") #'eglot-hierarchy-incoming-calls-at-point)
-      (evil-define-key evil-motion-state-map map (kbd "o") #'eglot-hierarchy-outgoing-calls-at-point))
     map)
   "Keymap active in *eglot-hierarchy* buffers.")
 
